@@ -20,12 +20,19 @@ class LetsEncrypt {
       this.securePort = 443,
       this.bindingAddress = '0.0.0.0',
       this.production = false,
+      this.selfTest = true,
       Logging? log})
       : logger = Logger(log);
 
   final int port;
   final int securePort;
   final String bindingAddress;
+
+  /// If try we make a connection back to ourseleves
+  /// to ensure that port 80 is open.
+  /// This doesn't work so well in a containerised environment
+  /// so we provide the option to disable it.
+  final bool selfTest;
 
   Logger logger;
 
@@ -116,11 +123,12 @@ class LetsEncrypt {
 
     logger.info('Self test challenge... ${challengeData.toJson()}');
 
-    final selfTestOK = await _selfChallengeTest(client, challengeData);
-    if (!selfTestOK) {
-      throw StateError('Self HTTP test not OK!');
+    if (selfTest) {
+      final selfTestOK = await _selfChallengeTest(client, challengeData);
+      if (!selfTestOK) {
+        throw StateError('Self HTTP test not OK!');
+      }
     }
-
     final challenge =
         mainAuth.challenges!.firstWhere((e) => e.type == VALIDATION_HTTP);
 
