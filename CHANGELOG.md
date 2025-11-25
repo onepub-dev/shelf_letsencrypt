@@ -1,3 +1,14 @@
+## 2.0.2
+
+- multi_domain_secure_server: ^1.0.14
+- basic_utils: ^5.8.2
+- collection: ^1.19.0
+
+- dependency_validator: ^5.0.3
+- coverage: ^1.15.0
+- lints: ^5.1.1
+- test: ^1.28.0
+
 ## 2.0.1
 
 - multi_domain_secure_server: ^1.0.12
