@@ -1,5 +1,7 @@
 ## 2.0.2
 
+- sdk: '>=3.5.0 <4.0.0'
+
 - multi_domain_secure_server: ^1.0.14
 - basic_utils: ^5.8.2
 - collection: ^1.19.0
