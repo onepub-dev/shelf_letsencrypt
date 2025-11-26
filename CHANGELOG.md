@@ -1,6 +1,6 @@
 ## 2.0.3
 
-- multi_domain_secure_server: ^1.0.15
+- multi_domain_secure_server: ^1.0.16
 
 ## 2.0.2
 
