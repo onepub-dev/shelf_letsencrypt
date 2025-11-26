@@ -1,3 +1,7 @@
+## 2.0.3
+
+- multi_domain_secure_server: ^1.0.15
+
 ## 2.0.2
 
 - sdk: '>=3.5.0 <4.0.0'
