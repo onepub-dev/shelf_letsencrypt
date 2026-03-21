@@ -1,20 +1,24 @@
-// ignore_for_file: avoid_catches_without_on_clauses
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:acme_client/acme_client.dart';
+import 'package:multi_domain_secure_server/multi_domain_secure_server.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart';
-import 'package:shelf_letsencrypt/src/check_certificate_status.dart';
 
 import 'certs_handler.dart';
+import 'check_certificate_status.dart';
 import 'domain.dart';
 import 'logging.dart';
 
 /// Let's Encrypt certificate tool.
 class LetsEncrypt {
+  final int port;
+  final int securePort;
+  final String bindingAddress;
+  final bool selfTest;
+
   LetsEncrypt(this.certificatesHandler,
       {this.port = 80,
       this.securePort = 443,
@@ -23,16 +27,6 @@ class LetsEncrypt {
       this.selfTest = true,
       Logging? log})
       : logger = Logger(log);
-
-  final int port;
-  final int securePort;
-  final String bindingAddress;
-
-  /// If try we make a connection back to ourseleves
-  /// to ensure that port 80 is open.
-  /// This doesn't work so well in a containerised environment
-  /// so we provide the option to disable it.
-  final bool selfTest;
 
   Logger logger;
 
@@ -275,7 +269,8 @@ class LetsEncrypt {
     return Response.ok(challengeToken);
   }
 
-  @Deprecated('Use startServer')
+  /// Use [startServer].
+  @Deprecated('Use `startServer`. Will be removed at v2.1.0')
   Future<List<HttpServer>> startSecureServer(
       Handler handler, Map<String, String> domainsAndEmails,
       {int? backlog,
@@ -289,34 +284,57 @@ class LetsEncrypt {
     for (var entry in domainsAndEmails.entries) {
       domains.add(Domain(name: entry.key, email: entry.value));
     }
-    return startServer(handler, domains,
+
+    var servers = await startServer(handler, domains,
         backlog: backlog,
         shared: shared,
         checkCertificate: checkCertificate,
         requestCertificate: requestCertificate,
         forceRequestCertificate: forceRequestCertificate,
         loadAllHandledDomains: loadAllHandledDomains);
+
+    return [servers.http, servers.https];
   }
 
   /// Starts 2 [HttpServer] instances, one HTTP at [port]
   /// and other HTTPS at [securePort].
   ///
-  /// - If [checkCertificate] is `true`, will check the current certificate
-  /// - if [requestCertificate] is `true` then we will  acquire/renew the certificate
-  ///  as needed.
-  /// - If [forceRequestCertificate] is `true` then we will force the acquistion
-  /// of a new certificate. WARNING: the Lets Encrypt CA has VERY tight rate limits
-  /// on certificate acquistion. If you breach them you will not be able to
-  /// acquire a new production certificate for 168 hours!!!!
-  Future<List<HttpServer>> startServer(Handler handler, List<Domain> domains,
+  /// - If [checkCertificate] is `true`, will check the current certificates.
+  /// - if [requestCertificate] is `true` then we will  acquire/renew the certificates
+  ///   as needed.
+  /// - If [forceRequestCertificate] is `true` then we will force the acquisition
+  ///   of a new certificates.
+  ///
+  /// *WARNINGS:*
+  /// - *The Lets Encrypt CA has VERY tight rate limits
+  ///   on certificate acquisition. If you breach them you will not be able to
+  ///   acquire a new production certificate for 168 hours!!!*
+  /// - *Only use `requestCertificate: true` or `forceRequestCertificate: true`
+  ///   if you are certain that you won't make unnecessary certificate requests.*
+  Future<({HttpServer http, HttpServer https})> startServer(
+      Handler handler, List<Domain> domains,
       {int? backlog,
       bool shared = false,
+      bool v6Only = false,
       bool checkCertificate = true,
       bool requestCertificate = true,
       bool forceRequestCertificate = false,
       bool loadAllHandledDomains = false}) async {
+    var invalidDomains = domains.where((d) => !d.isValidName).toList();
+
+    if (invalidDomains.isNotEmpty) {
+      logger
+          .info("Ignoring invalid domains: ${Domain.toNames(invalidDomains)}");
+
+      domains.removeWhere((d) => !d.isValidName);
+    }
+
+    if (domains.isEmpty) {
+      throw ArgumentError("Empty `domains`! No valid domain provided.");
+    }
+
     logger.info(
-        '''Starting server> bindingAddress: $bindingAddress ; port: $port ; domain: $domains''');
+        "Starting server> bindingAddress: $bindingAddress ; port: $port ; domain: $domains");
 
     FutureOr<Response> handlerWithChallenge(Request r) {
       final path = r.requestedUri.path;
@@ -335,9 +353,51 @@ class LetsEncrypt {
     final server = await serve(handlerWithChallenge, bindingAddress, port,
         backlog: backlog, shared: shared);
 
-    Future<HttpServer> startSecureServer(SecurityContext securityContext) =>
-        serve(handlerWithChallenge, bindingAddress, securePort,
-            securityContext: securityContext, backlog: backlog, shared: shared);
+    Future<HttpServer> startSecureServer(
+        Map<String, SecurityContext> securityContexts,
+        {int? backlog,
+        bool v6Only = false,
+        bool shared = false}) async {
+      var defaultSecurityContext = securityContexts['*'] ??
+          securityContexts.entries.firstOrNull?.value ??
+          (throw ArgumentError(
+              "Can't define `defaultSecurityContext`> null `defaultSecurityContext` and empty `securityContexts`"));
+
+      var hasMultipleDomains = securityContexts.length > 1;
+
+      if (hasMultipleDomains ||
+              v6Only // `shelf` doesn't provide parameter `v6Only`
+          ) {
+        logger.info(
+            '''Starting secure server with `MultiDomainSecureServer`> domains: ${securityContexts.keys.toList()}''');
+
+        var secureServer = await MultiDomainSecureServer.bind(
+          bindingAddress,
+          securePort,
+          backlog: backlog ?? 0,
+          v6Only: v6Only,
+          shared: shared,
+          requiresHandshakesWithHostname: true,
+          defaultSecureContext: defaultSecurityContext,
+          securityContextResolver: (hostname) => securityContexts[hostname],
+        );
+
+        var httpServer = secureServer.asHttpServer();
+
+        serveRequests(httpServer, handlerWithChallenge);
+
+        return httpServer;
+      } else {
+        return serve(
+          handlerWithChallenge,
+          bindingAddress,
+          securePort,
+          securityContext: defaultSecurityContext,
+          backlog: backlog,
+          shared: shared,
+        );
+      }
+    }
 
     HttpServer? secureServer;
 
@@ -345,22 +405,29 @@ class LetsEncrypt {
     logger.info(
         'Handled domains: ${certificatesHandler.listAllHandledDomains()}');
 
-    var securityContext = await certificatesHandler.buildSecurityContext(
+    var securityContexts = await certificatesHandler.buildSecurityContexts(
         domains,
+        allowUnresolvedDomain: false,
         loadAllHandledDomains: loadAllHandledDomains);
 
     logger.info(
-        '''securityContext[loadAllHandledDomains: $loadAllHandledDomains]: $securityContext''');
+        '''securityContext[loadAllHandledDomains: $loadAllHandledDomains]: $securityContexts''');
 
-    if (securityContext == null) {
+    if (securityContexts == null || securityContexts.isEmpty) {
       if (!requestCertificate) {
-        throw StateError(
-            """No previous SecureContext. Parameter `requestCertificate` is `false`, can't request certificate!""");
+        if (securityContexts == null) {
+          throw StateError(
+              """Can't load all `SecurityContext`s. Parameter `requestCertificate` is `false`, can't request certificates! Domains: ${Domain.toNames(domains)}""");
+        } else {
+          throw StateError(
+              """No previous `SecurityContext`s. Parameter `requestCertificate` is `false`, can't request certificates! Domains: ${Domain.toNames(domains)}""");
+        }
       }
 
       final domainsToCheck = certificatesHandler.listNotHandledDomains(domains);
 
-      logger.info('Requesting certificate for: $domainsToCheck');
+      logger.info(
+          'Requesting certificate for: ${Domain.toNames(domainsToCheck)}');
 
       for (final domain in domainsToCheck) {
         final ok = await this.requestCertificate(domain);
@@ -369,18 +436,22 @@ class LetsEncrypt {
         }
       }
 
-      securityContext = await certificatesHandler.buildSecurityContext(domains,
+      securityContexts = await certificatesHandler.buildSecurityContexts(
+          domains,
+          allowUnresolvedDomain: false,
           loadAllHandledDomains: loadAllHandledDomains);
-      if (securityContext == null) {
+      if (securityContexts == null || securityContexts.isEmpty) {
         throw StateError(
-            '''Error loading SecureContext after successful request of certificate for: $domains''');
+            '''Error loading SecureContext after successful request of certificates> domainsToCheck: ${Domain.toNames(domainsToCheck)} ; domains: ${Domain.toNames(domains)}''');
       }
 
       logger.info(
           'Starting secure server> port: $securePort ; domains: $domains');
-      secureServer = await startSecureServer(securityContext);
+      secureServer = await startSecureServer(securityContexts,
+          backlog: backlog, shared: shared, v6Only: v6Only);
     } else {
-      secureServer = await startSecureServer(securityContext);
+      secureServer = await startSecureServer(securityContexts,
+          backlog: backlog, shared: shared, v6Only: v6Only);
 
       if (checkCertificate) {
         logger.info('Checking domains certificates: $domains');
@@ -406,22 +477,23 @@ class LetsEncrypt {
 
         if (refreshedCertificate) {
           logger.warning('Refreshing SecureContext due new certificate.');
-          securityContext = await certificatesHandler.buildSecurityContext(
+          securityContexts = await certificatesHandler.buildSecurityContexts(
               domains,
               loadAllHandledDomains: loadAllHandledDomains);
-          if (securityContext == null) {
+          if (securityContexts == null || securityContexts.isEmpty) {
             throw StateError(
                 '''Error loading SecureContext after successful certificate check for: ${Domain.toNames(domains)}''');
           }
 
           logger.warning('Restarting secure server...');
           await secureServer.close(force: true);
-          secureServer = await startSecureServer(securityContext);
+          secureServer = await startSecureServer(securityContexts,
+              backlog: backlog, shared: shared, v6Only: v6Only);
         }
       }
     }
 
-    return [server, secureServer];
+    return (http: server, https: secureServer);
   }
 
   /// Checks the [domain] certificate.

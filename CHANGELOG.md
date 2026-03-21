@@ -1,9 +1,71 @@
+## 2.0.3
+
+- multi_domain_secure_server: ^1.0.16
+
+## 2.0.2
+
+- sdk: '>=3.5.0 <4.0.0'
+
+- multi_domain_secure_server: ^1.0.14
+- basic_utils: ^5.8.2
+- collection: ^1.19.0
+
+- dependency_validator: ^5.0.3
+- coverage: ^1.15.0
+- lints: ^5.1.1
+- test: ^1.28.0
+
+## 2.0.1
+
+- multi_domain_secure_server: ^1.0.12
+
 ## 2.0.0
-- BREAKING: moved the port, securePort and bindingAddress from  the startServer 
+
+- `LetsEncrypt`:
+  - `startServer`: ignore invalid domains.
+  - `startServer`:
+    - Added parameter `v6Only`.
+    - Use `MultiDomainSecureServer` if multiple domains are being served:
+      - Utilize `MultiDomainSecureServer.asHttpServer()` to provide an `HttpServer` instance for `shelf.serveRequests`.
+      - `MultiDomainSecureServer`:
+        - Pass `requiresHandshakesWithHostname: true`.
+        - Ensure that `HttpServer.listenOn` receives requests from a `SecureSocket`.
+
+- `Domain`:
+  - Added `isValidName`.
+
+- multi_domain_secure_server: ^1.0.10
+- dependency_validator: ^4.1.2
+- coverage: ^1.11.1
+- lints: ^4.0.0
+- test: ^1.25.12
+
+## 2.0.0-beta.1
+
+- BREAKING: Moved the port, securePort and bindingAddress from the startServer
   method to the LetsEncrypt constructor.
+- Added new version of startServer which takes a list of Domains rather than a
+  map of domain/emails. This should make
+  the API clearer.
+- Deprecated startSecureServer in favour of startServer. startSecureServer will be removed in `v2.1.0`.
 - Fixed a number of bugs where an alternate port was being ignored.
-- Added new version of startServer which takes a list of Domains rather than a map of domain/emails. This should make the API clearer.
-- deprecated startSecureServer in favour of startServer. startSecureServer will be removed in 2.1.0
+
+- `SecurityContextBuilder`:
+  - Changed `build` to `buildAll`, returning a `Map<String, SecurityContext>`.
+
+- `LetsEncrypt.startServer`:
+  - Now receives a `Map<String, SecurityContext> securityContexts` and an optional `SecurityContext? defaultSecurityContext`.
+
+- acme_client: ^1.3.0
+- basic_utils: ^5.7.0
+- path: ^1.9.1
+- shelf: ^1.4.2
+
+- dependency_validator: ^3.2.3
+- coverage: ^1.11.0
+- cron: ^0.5.1
+- lints: ^3.0.0
+- test: ^1.25.9
 
 ## 1.2.2
 

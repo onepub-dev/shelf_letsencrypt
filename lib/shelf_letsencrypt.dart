@@ -1,5 +1,5 @@
 /// `Let's Encrypt` support for the `shelf` package.
-library shelf_letsencrypt;
+library;
 
 export 'src/certificates_handler_io.dart';
 export 'src/certs_handler.dart';

@@ -16,3 +16,4 @@ pubspec.lock
 pubspec.yaml
 logs/analyzer.txt
 .mcp_logs
+.DS_Store
