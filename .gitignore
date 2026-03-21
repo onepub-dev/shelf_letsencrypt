@@ -13,3 +13,6 @@ pubspec.lock
 
 .history
 .failed_tracker
+pubspec.yaml
+logs/analyzer.txt
+.mcp_logs
