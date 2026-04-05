@@ -1,3 +1,15 @@
+## 2.2.0
+
+- added `LetsEncrypt.prepareDnsPersistCertificateRequest(...)` for a manual
+  two-phase `dns-persist-01` flow
+- added `PendingDnsPersistRequest`
+- added the `shelf_letsencrypt_dns_persist` CLI helper
+
+## 2.1.0
+
+- migrated to `acme_client` v2
+- added support for `dns-persist-01` via `LetsEncryptChallengeType.dnsPersist`
+
 ## 2.0.3
 
 - multi_domain_secure_server: ^1.0.16

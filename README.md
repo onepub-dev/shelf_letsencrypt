@@ -17,6 +17,10 @@
 
 [letsencrypt]: https://letsencrypt.org/
 
+`dns-persist-01` is the recommended challenge type when your ACME CA supports
+it. It avoids serving transient HTTP challenge files and is designed for a
+stable delegated DNS TXT record tied to your ACME account.
+
 # Developing with shelf_letsencrypt
 LetsEncrypt provide a few challenges for your development enviroment. 
 Read on for a few hints.
@@ -127,6 +131,11 @@ void main(List<String> args) async {
     production: false, // If `true` uses Let's Encrypt production API.
     port: 80,
     securePort: 443,
+    // For automated dns-persist-01 use:
+    // challengeType: LetsEncryptChallengeType.dnsPersist,
+    // dnsPersistChallengePublisher: (domainName, proof) async {
+    //   print('Publish ${proof.txtRecordName} = ${proof.txtRecordValue}');
+    // },
   );
 
   var servers = await _startServer(letsEncrypt, domains);
@@ -215,6 +224,36 @@ The example includes a renewal service that does a daily check if any certificat
 need renewing.
 If a cert needs to be renewed, it will renew it and then gracefully restart
 the server with the new certs.
+
+## Manual dns-persist-01 flow
+
+If you cannot publish DNS records automatically, prepare the request first,
+show the TXT record to an operator, and only continue once the record has been
+published:
+
+```dart
+final pending = await letsEncrypt.prepareDnsPersistCertificateRequest(
+  const Domain(name: 'example.com', email: 'contact@example.com'),
+);
+
+print(pending.proof.txtRecordName);
+print(pending.proof.txtRecordValue);
+
+// Wait for the operator to publish the TXT record...
+final ok = await pending.complete();
+```
+
+The package also ships a small CLI for this flow:
+
+```sh
+dart run shelf_letsencrypt_dns_persist \
+  --domain example.com \
+  --email contact@example.com \
+  --cert-dir ./certs
+```
+
+The CLI prints the TXT record, waits for confirmation, then validates and
+stores the issued certificate in the chosen certificate directory.
 
 ## Source
 

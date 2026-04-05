@@ -70,6 +70,7 @@ void main() {
       final letsEncrypt = LetsEncrypt(certificatesHandler);
 
       expect(letsEncrypt.production, isFalse);
+      expect(letsEncrypt.challengeType, LetsEncryptChallengeType.http);
 
       expect(letsEncrypt.apiBaseURL,
           allOf(contains('letsencrypt.org'), contains('staging')));
@@ -80,6 +81,53 @@ void main() {
       );
 
       expect(checkCertificateStatus, equals(CheckCertificateStatus.invalid));
+    });
+
+    test('dns-persist configuration', () async {
+      final certificatesHandler = CertificatesHandlerIO(
+          Directory(pack_path.join(tmpDir.path, 'certs-dns-persist')));
+
+      final publishedProofs = <String>[];
+      final letsEncrypt = LetsEncrypt(
+        certificatesHandler,
+        challengeType: LetsEncryptChallengeType.dnsPersist,
+        dnsPersistChallengePublisher: (domainName, proof) {
+          publishedProofs.add('$domainName ${proof.txtRecordName}');
+        },
+      );
+
+      expect(
+        letsEncrypt.challengeType,
+        LetsEncryptChallengeType.dnsPersist,
+      );
+      expect(letsEncrypt.dnsPersistChallengePublisher, isNotNull);
+      expect(publishedProofs, isEmpty);
+    });
+
+    test('dns-persist manual flow guidance', () async {
+      final certificatesHandler = CertificatesHandlerIO(
+          Directory(pack_path.join(tmpDir.path, 'certs-dns-persist-manual')));
+
+      final letsEncrypt = LetsEncrypt(
+        certificatesHandler,
+        challengeType: LetsEncryptChallengeType.dnsPersist,
+      );
+
+      await expectLater(
+        () => letsEncrypt.requestCertificate(
+          const Domain(name: 'example.com', email: 'contact@example.com'),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            allOf(
+              contains('prepareDnsPersistCertificateRequest'),
+              contains('dnsPersistChallengePublisher'),
+            ),
+          ),
+        ),
+      );
     });
 
     test('ACME path + processACMEChallengeRequest', () async {
