@@ -16,10 +16,16 @@
 [shelf_package]: https://pub.dev/packages/shelf
 
 [letsencrypt]: https://letsencrypt.org/
+[letsencrypt_dns_persist_status]: https://letsencrypt.org/2026/02/18/dns-persist-01
+[letsencrypt_dns_persist_deployment]: https://community.letsencrypt.org/t/dns-persist-01-deployment-status-and-timeline/246468
 
 `dns-persist-01` is the recommended challenge type when your ACME CA supports
-it. It avoids serving transient HTTP challenge files and is designed for a
-stable delegated DNS TXT record tied to your ACME account.
+it. It avoids serving transient HTTP challenge files, keeps your development
+machine private, and is designed for a stable delegated DNS TXT record tied to
+your ACME account. Let's Encrypt is rolling out support for this challenge; see
+their [DNS-PERSIST-01 status post][letsencrypt_dns_persist_status] and the
+[deployment status thread][letsencrypt_dns_persist_deployment] before relying on
+it for production issuance.
 
 # Developing with shelf_letsencrypt
 ACME certificate authorities use challenges to prove that you control the
@@ -53,7 +59,35 @@ final LetsEncrypt letsEncrypt = LetsEncrypt(certificatesHandler, production: fal
 
 ## Challenge mechanisms
 
-### http-01
+### dns-persist-01 (recommended where supported)
+
+`dns-persist-01` proves control of the domain with a stable delegated DNS TXT
+record rather than an inbound HTTP request. Use it when your ACME CA supports
+the challenge and you can publish the required TXT record.
+
+Development implications:
+
+- Your development server does not need to be reachable from the public internet
+  for certificate issuance.
+- NAT and inbound port forwarding are not required for the ACME challenge.
+- You need control of the domain's DNS, or a delegated validation name, so the
+  TXT record can be published.
+- DNS publication can be automated with `dnsPersistChallengePublisher`, or you
+  can use `prepareDnsPersistCertificateRequest(...)` for a manual operator flow.
+- The issued certificate is still for the requested domain, so your application
+  DNS and routing still need to make sense for however you plan to serve the app
+  after the certificate is issued.
+
+This mode is the better fit for most development environments because the laptop
+or workstation can stay private. It also avoids coupling certificate issuance to
+home-router NAT, public Wi-Fi, or temporary firewall rules.
+
+Note: Let's Encrypt announced DNS-PERSIST-01 support as a rollout item in
+February 2026. Pebble support is available, but Let's Encrypt production support
+depends on their rollout and the evolving IETF draft. Check the linked Let's
+Encrypt status resources before using this challenge against production.
+
+### http-01 (fallback/default)
 
 `http-01` is the default challenge type. The ACME server validates the request
 by fetching a token from:
@@ -79,29 +113,6 @@ For local testing with `http-01`, I normally use a cheap test domain and point
 its A record at my development router. The router then forwards port 80 to the
 local server port used by the example app.
 
-### dns-persist-01
-
-`dns-persist-01` proves control of the domain with a stable delegated DNS TXT
-record rather than an inbound HTTP request. Use it when your ACME CA supports
-the challenge and you can publish the required TXT record.
-
-Development implications:
-
-- Your development server does not need to be reachable from the public internet
-  for certificate issuance.
-- NAT and inbound port forwarding are not required for the ACME challenge.
-- You need control of the domain's DNS, or a delegated validation name, so the
-  TXT record can be published.
-- DNS publication can be automated with `dnsPersistChallengePublisher`, or you
-  can use `prepareDnsPersistCertificateRequest(...)` for a manual operator flow.
-- The issued certificate is still for the requested domain, so your application
-  DNS and routing still need to make sense for however you plan to serve the app
-  after the certificate is issued.
-
-This mode is the better fit for most development environments because the laptop
-or workstation can stay private. It also avoids coupling certificate issuance to
-home-router NAT, public Wi-Fi, or temporary firewall rules.
-
 ## Multi-Domain Support
 Starting with `shelf_letsencrypt: 2.0.0`, support for multiple domains on the
 same HTTPS port has been introduced. This enhancement allows
@@ -124,7 +135,82 @@ Choose the challenge mechanism first, then wire `LetsEncrypt` for that flow.
 Use `production: false` while testing so certificate requests go to the staging
 ACME endpoint.
 
-### http-01 server flow (default)
+### Recommended: automated dns-persist-01
+
+Use automated `dns-persist-01` when your ACME CA supports the challenge and your
+application can publish DNS TXT records through your DNS provider's API. In this
+mode, `shelf_letsencrypt` prepares the ACME challenge and calls your
+`dnsPersistChallengePublisher` callback with the TXT record that must exist
+before validation continues.
+
+```dart
+final letsEncrypt = LetsEncrypt(
+  certificatesHandler,
+  production: false,
+  challengeType: LetsEncryptChallengeType.dnsPersist,
+  dnsPersistChallengePublisher: (domainName, proof) async {
+    await publishTxtRecord(
+      proof.txtRecordName,
+      proof.txtRecordValue,
+    );
+  },
+);
+```
+
+`publishTxtRecord` is application code that you provide. It should create or
+update the TXT record through your DNS provider and return only when the record
+is ready for validation.
+
+### Manual dns-persist-01 API flow
+
+Use the manual API when a human operator needs to publish the DNS TXT record.
+Prepare the request first, show the TXT record to the operator, and only call
+`complete()` once the record has been published:
+
+```dart
+final pending = await letsEncrypt.prepareDnsPersistCertificateRequest(
+  const Domain(name: 'example.com', email: 'contact@example.com'),
+);
+
+print(pending.proof.txtRecordName);
+print(pending.proof.txtRecordValue);
+print(pending.proof.toBindString());
+
+// Wait for the operator to publish the TXT record...
+final ok = await pending.complete();
+```
+
+`complete()` validates the challenge, finalizes the order, fetches the
+certificate chain, and stores it through the configured `CertificatesHandler`.
+
+### CLI helper for dns-persist-01
+
+The package ships a CLI for the same manual `dns-persist-01` flow:
+
+```sh
+dart run shelf_letsencrypt_dns_persist \
+  --domain example.com \
+  --email contact@example.com \
+  --cert-dir ./certs
+```
+
+The CLI prepares the request, prints the TXT record details, prints a BIND-style
+record line, and waits for confirmation before it asks the ACME server to
+validate the challenge. It does not publish DNS records itself; publish the TXT
+record with your DNS provider before pressing ENTER.
+
+Useful options:
+
+- `--cert-dir <path>` chooses the certificate directory used by
+  `CertificatesHandlerIO`. Use the same directory your app will read from.
+- `--acme-dir <url>` targets a custom ACME directory, such as a local Pebble
+  server.
+- `--production` uses the Let's Encrypt production endpoint. Use it for
+  `dns-persist-01` only when Let's Encrypt production supports the challenge.
+- `--yes` skips the ENTER prompt. Use this only when automation has already
+  published the required TXT record.
+
+### http-01 server flow (fallback/default)
 
 Use `http-01` when the ACME server can reach your app over public HTTP. This is
 the default `LetsEncrypt` mode and is the simplest production setup when port 80
@@ -243,80 +329,6 @@ Response _processRequest(Request request) =>
     Response.ok('Requested: ${request.requestedUri}');
 
 ```
-
-### Automated dns-persist-01
-
-Use automated `dns-persist-01` when your ACME CA supports the challenge and your
-application can publish DNS TXT records through your DNS provider's API. In this
-mode, `shelf_letsencrypt` prepares the ACME challenge and calls your
-`dnsPersistChallengePublisher` callback with the TXT record that must exist
-before validation continues.
-
-```dart
-final letsEncrypt = LetsEncrypt(
-  certificatesHandler,
-  production: false,
-  challengeType: LetsEncryptChallengeType.dnsPersist,
-  dnsPersistChallengePublisher: (domainName, proof) async {
-    await publishTxtRecord(
-      proof.txtRecordName,
-      proof.txtRecordValue,
-    );
-  },
-);
-```
-
-`publishTxtRecord` is application code that you provide. It should create or
-update the TXT record through your DNS provider and return only when the record
-is ready for validation.
-
-### Manual dns-persist-01 API flow
-
-Use the manual API when a human operator needs to publish the DNS TXT record.
-Prepare the request first, show the TXT record to the operator, and only call
-`complete()` once the record has been published:
-
-```dart
-final pending = await letsEncrypt.prepareDnsPersistCertificateRequest(
-  const Domain(name: 'example.com', email: 'contact@example.com'),
-);
-
-print(pending.proof.txtRecordName);
-print(pending.proof.txtRecordValue);
-print(pending.proof.toBindString());
-
-// Wait for the operator to publish the TXT record...
-final ok = await pending.complete();
-```
-
-`complete()` validates the challenge, finalizes the order, fetches the
-certificate chain, and stores it through the configured `CertificatesHandler`.
-
-### CLI helper for dns-persist-01
-
-The package ships a CLI for the same manual `dns-persist-01` flow:
-
-```sh
-dart run shelf_letsencrypt_dns_persist \
-  --domain example.com \
-  --email contact@example.com \
-  --cert-dir ./certs
-```
-
-The CLI prepares the request, prints the TXT record details, prints a BIND-style
-record line, and waits for confirmation before it asks the ACME server to
-validate the challenge. It does not publish DNS records itself; publish the TXT
-record with your DNS provider before pressing ENTER.
-
-Useful options:
-
-- `--cert-dir <path>` chooses the certificate directory used by
-  `CertificatesHandlerIO`. Use the same directory your app will read from.
-- `--acme-dir <url>` targets a custom ACME directory, such as a local Pebble
-  server.
-- `--production` uses the Let's Encrypt production endpoint.
-- `--yes` skips the ENTER prompt. Use this only when automation has already
-  published the required TXT record.
 
 ## Renewals
 
