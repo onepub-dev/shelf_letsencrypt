@@ -22,8 +22,10 @@ it. It avoids serving transient HTTP challenge files and is designed for a
 stable delegated DNS TXT record tied to your ACME account.
 
 # Developing with shelf_letsencrypt
-Let's Encrypt provides a few challenges for your development environment.
-Read on for a few hints.
+ACME certificate authorities use challenges to prove that you control the
+domain before they issue a certificate. `shelf_letsencrypt` supports two
+challenge mechanisms, and the right choice changes what your development
+environment needs to expose.
 
 ## A word of caution
 Let's Encrypt rate-limits the issuing of production certificates.
@@ -49,35 +51,56 @@ final LetsEncrypt letsEncrypt = LetsEncrypt(certificatesHandler, production: fal
 ```
 
 
-## Permissions
-On Linux you need to be root (sudo) to open a port below 1024. If you try
-to start your server with the default ports (80, 443) you will fail.
+## Challenge mechanisms
 
+### http-01
 
-## NAT for your development environment
-To issue a certificate, Let's Encrypt needs to be able to connect to your
-web server on port 80.
-This will work fine in production (with the right firewall rules), but in
-a development environment can be a bit tricky.
+`http-01` is the default challenge type. The ACME server validates the request
+by fetching a token from:
 
-The above permission limitations add to the complication.
+```text
+http://<domain>/.well-known/acme-challenge/<token>
+```
 
-The easiest way to do this is (for dev):
-1. Start your server on ports 8080 and 8443 (or any pair above 1024).
-2. Set up two NAT rules on your router that forward ports to your dev machine:
-   80 -> 8080
-   443 -> 8443
+Development implications:
 
+- The domain's public DNS must resolve to the machine, router, or load balancer
+  that can reach your development server.
+- Port 80 must be reachable from the public internet. If your app listens on a
+  high port such as 8080, your router or firewall needs to forward public port
+  80 to that local port.
+- On Linux, binding directly to ports below 1024 usually requires root
+  privileges, `sudo`, or a capability such as `CAP_NET_BIND_SERVICE`.
+- This mode is convenient when your development machine is deliberately exposed
+  to the internet, but it is awkward behind carrier-grade NAT, restrictive
+  firewalls, or networks where inbound port forwarding is unavailable.
 
-## DNS for development
-For Let's Encrypt to issue a certificate, it must be able to resolve the domain
-name of the certificate that you are requesting.
+For local testing with `http-01`, I normally use a cheap test domain and point
+its A record at my development router. The router then forwards port 80 to the
+local server port used by the example app.
 
-To avoid tampering with your production DNS, I keep a cheap domain name that I
-use for testing.
-I then use Cloudflare's free DNS hosting service to host the domain name, which
-allows me to add the necessary A record pointing to my WFH router, where I've
-configured the above NAT.
+### dns-persist-01
+
+`dns-persist-01` proves control of the domain with a stable delegated DNS TXT
+record rather than an inbound HTTP request. Use it when your ACME CA supports
+the challenge and you can publish the required TXT record.
+
+Development implications:
+
+- Your development server does not need to be reachable from the public internet
+  for certificate issuance.
+- NAT and inbound port forwarding are not required for the ACME challenge.
+- You need control of the domain's DNS, or a delegated validation name, so the
+  TXT record can be published.
+- DNS publication can be automated with `dnsPersistChallengePublisher`, or you
+  can use `prepareDnsPersistCertificateRequest(...)` for a manual operator flow.
+- The issued certificate is still for the requested domain, so your application
+  DNS and routing still need to make sense for however you plan to serve the app
+  after the certificate is issued.
+
+This mode is the better fit for most development environments because the laptop
+or workstation can stay private. It also avoids coupling certificate issuance to
+home-router NAT, public Wi-Fi, or temporary firewall rules.
 
 ## Multi-Domain Support
 Starting with `shelf_letsencrypt: 2.0.0`, support for multiple domains on the
@@ -97,7 +120,18 @@ details, check out the source code on [GitHub][github_multi_domain_secure_server
 
 # Usage
 
-To use the `LetsEncrypt` class:
+Choose the challenge mechanism first, then wire `LetsEncrypt` for that flow.
+Use `production: false` while testing so certificate requests go to the staging
+ACME endpoint.
+
+### http-01 server flow (default)
+
+Use `http-01` when the ACME server can reach your app over public HTTP. This is
+the default `LetsEncrypt` mode and is the simplest production setup when port 80
+already routes to the server.
+
+The example below starts HTTP and HTTPS servers, serves ACME challenge responses
+from `/.well-known/acme-challenge/...`, and checks for certificate renewal:
 
 ```dart
 import 'dart:io';
@@ -134,11 +168,6 @@ void main(List<String> args) async {
     production: false, // If `true` uses Let's Encrypt production API.
     port: 80,
     securePort: 443,
-    // For automated dns-persist-01 use:
-    // challengeType: LetsEncryptChallengeType.dnsPersist,
-    // dnsPersistChallengePublisher: (domainName, proof) async {
-    //   print('Publish ${proof.txtRecordName} = ${proof.txtRecordValue}');
-    // },
   );
 
   var servers = await _startServer(letsEncrypt, domains);
@@ -215,6 +244,80 @@ Response _processRequest(Request request) =>
 
 ```
 
+### Automated dns-persist-01
+
+Use automated `dns-persist-01` when your ACME CA supports the challenge and your
+application can publish DNS TXT records through your DNS provider's API. In this
+mode, `shelf_letsencrypt` prepares the ACME challenge and calls your
+`dnsPersistChallengePublisher` callback with the TXT record that must exist
+before validation continues.
+
+```dart
+final letsEncrypt = LetsEncrypt(
+  certificatesHandler,
+  production: false,
+  challengeType: LetsEncryptChallengeType.dnsPersist,
+  dnsPersistChallengePublisher: (domainName, proof) async {
+    await publishTxtRecord(
+      proof.txtRecordName,
+      proof.txtRecordValue,
+    );
+  },
+);
+```
+
+`publishTxtRecord` is application code that you provide. It should create or
+update the TXT record through your DNS provider and return only when the record
+is ready for validation.
+
+### Manual dns-persist-01 API flow
+
+Use the manual API when a human operator needs to publish the DNS TXT record.
+Prepare the request first, show the TXT record to the operator, and only call
+`complete()` once the record has been published:
+
+```dart
+final pending = await letsEncrypt.prepareDnsPersistCertificateRequest(
+  const Domain(name: 'example.com', email: 'contact@example.com'),
+);
+
+print(pending.proof.txtRecordName);
+print(pending.proof.txtRecordValue);
+print(pending.proof.toBindString());
+
+// Wait for the operator to publish the TXT record...
+final ok = await pending.complete();
+```
+
+`complete()` validates the challenge, finalizes the order, fetches the
+certificate chain, and stores it through the configured `CertificatesHandler`.
+
+### CLI helper for dns-persist-01
+
+The package ships a CLI for the same manual `dns-persist-01` flow:
+
+```sh
+dart run shelf_letsencrypt_dns_persist \
+  --domain example.com \
+  --email contact@example.com \
+  --cert-dir ./certs
+```
+
+The CLI prepares the request, prints the TXT record details, prints a BIND-style
+record line, and waits for confirmation before it asks the ACME server to
+validate the challenge. It does not publish DNS records itself; publish the TXT
+record with your DNS provider before pressing ENTER.
+
+Useful options:
+
+- `--cert-dir <path>` chooses the certificate directory used by
+  `CertificatesHandlerIO`. Use the same directory your app will read from.
+- `--acme-dir <url>` targets a custom ACME directory, such as a local Pebble
+  server.
+- `--production` uses the Let's Encrypt production endpoint.
+- `--yes` skips the ENTER prompt. Use this only when automation has already
+  published the required TXT record.
+
 ## Renewals
 
 Each time you call `startServer`, it will check if any certificates need to
@@ -227,36 +330,6 @@ The example includes a renewal service that does a daily check to see if any
 certificates need renewing.
 If a cert needs to be renewed, it will renew it and then gracefully restart
 the server with the new certs.
-
-## Manual dns-persist-01 flow
-
-If you cannot publish DNS records automatically, prepare the request first,
-show the TXT record to an operator, and only continue once the record has been
-published:
-
-```dart
-final pending = await letsEncrypt.prepareDnsPersistCertificateRequest(
-  const Domain(name: 'example.com', email: 'contact@example.com'),
-);
-
-print(pending.proof.txtRecordName);
-print(pending.proof.txtRecordValue);
-
-// Wait for the operator to publish the TXT record...
-final ok = await pending.complete();
-```
-
-The package also ships a small CLI for this flow:
-
-```sh
-dart run shelf_letsencrypt_dns_persist \
-  --domain example.com \
-  --email contact@example.com \
-  --cert-dir ./certs
-```
-
-The CLI prints the TXT record, waits for confirmation, then validates and
-stores the issued certificate in the chosen certificate directory.
 
 ## Source
 
