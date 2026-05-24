@@ -18,6 +18,8 @@
 [letsencrypt]: https://letsencrypt.org/
 [letsencrypt_dns_persist_status]: https://letsencrypt.org/2026/02/18/dns-persist-01
 [letsencrypt_dns_persist_deployment]: https://community.letsencrypt.org/t/dns-persist-01-deployment-status-and-timeline/246468
+[letsencrypt_integration_guide]: https://letsencrypt.org/ca/docs/integration-guide/
+[letsencrypt_short_lifetimes]: https://letsencrypt.org/2025/12/02/from-90-to-45
 
 `dns-persist-01` is the recommended challenge type when your ACME CA supports
 it. It avoids serving transient HTTP challenge files, keeps your development
@@ -159,7 +161,19 @@ final letsEncrypt = LetsEncrypt(
 
 `publishTxtRecord` is application code that you provide. It should create or
 update the TXT record through your DNS provider and return only when the record
-is ready for validation.
+has been submitted to your DNS provider.
+
+Once the call to `publishTxtRecord` completes, `shelf_letsencrypt` will wait for
+DNS visibility before asking the ACME server to validate the challenge. It does
+this by calling the `dns-persist-01` challenge self-test supplied by
+`acme_client`; that self-test polls DNS for the required TXT record. If you set
+`selfTest: false`, this propagation check is skipped and your publisher must
+return only after the record is externally verifiable.
+
+If the persistent TXT record has already been published, you can omit
+`dnsPersistChallengePublisher` and leave `selfTest` enabled. In that case
+`shelf_letsencrypt` verifies the existing DNS record before asking the ACME
+server to validate the challenge.
 
 ### Manual dns-persist-01 API flow
 
@@ -182,6 +196,19 @@ final ok = await pending.complete();
 
 `complete()` validates the challenge, finalizes the order, fetches the
 certificate chain, and stores it through the configured `CertificatesHandler`.
+It is safe to call more than once on the same pending request: concurrent calls
+share the same in-flight completion, successful completion is cached, and a
+failed completion can be retried. Pass `timeout: ...` to `complete()` when you
+want the validation/finalization step to fail after a bounded wait and allow a
+later retry.
+
+For restart safety, use the same certificate directory when you rerun the manual
+flow. The account key and domain key are reused from that directory, so the
+`dns-persist-01` TXT record remains stable across process restarts. If a
+previous run already stored a valid certificate, `complete()` returns success
+without asking the ACME server to validate or finalize the order again. Pass
+`forceRequestCertificate: true` to `complete()` to request a new certificate
+even when a valid certificate is already stored.
 
 ### CLI helper for dns-persist-01
 
@@ -209,12 +236,17 @@ Useful options:
   `dns-persist-01` only when Let's Encrypt production supports the challenge.
 - `--yes` skips the ENTER prompt. Use this only when automation has already
   published the required TXT record.
+- `--force-request-certificate` requests a new certificate even if a valid
+  certificate is already stored in the certificate directory.
 
-### http-01 server flow (fallback/default)
+### http-01 server flow (default mode)
 
 Use `http-01` when the ACME server can reach your app over public HTTP. This is
 the default `LetsEncrypt` mode and is the simplest production setup when port 80
-already routes to the server.
+already routes to the server. `http-01` is not an automatic fallback from
+`dns-persist-01`; `challengeType: LetsEncryptChallengeType.dnsPersist` locks
+certificate requests to `dns-persist-01`, and issuance fails if the ACME CA does
+not offer that challenge.
 
 The example below starts HTTP and HTTPS servers, serves ACME challenge responses
 from `/.well-known/acme-challenge/...`, and checks for certificate renewal:
@@ -333,8 +365,34 @@ Response _processRequest(Request request) =>
 ## Renewals
 
 Each time you call `startServer`, it will check if any certificates need to
-be renewed in the next 5 days (or if they are expired) and renew the
-certificates.
+be renewed. By default, `shelf_letsencrypt` renews when the certificate has
+one third of its lifetime remaining, capped at 30 days. This means a 90 day
+certificate is renewed with about 30 days remaining, and a 45 day certificate is
+renewed with about 15 days remaining. You can tune this cap with
+`LetsEncrypt.minCertificateValidityTime`.
+
+This follows Let's Encrypt's backstop guidance to renew automatically when a
+certificate has one third of its lifetime left. ACME Renewal Information (ARI)
+is preferred where an ACME client supports it; `shelf_letsencrypt` does not
+currently use ARI. See Let's Encrypt's
+[integration guide][letsencrypt_integration_guide] and
+[shorter certificate lifetimes guidance][letsencrypt_short_lifetimes].
+
+Renewal uses the challenge type configured on the `LetsEncrypt` instance that
+performs the renewal. The existing certificate does not store which challenge
+type was used for the original request.
+
+For `dns-persist-01`, the TXT record should normally be
+published once, then reused across renewals while the same ACME account key is
+kept. If the record already exists, automated renewal can run without
+`dnsPersistChallengePublisher` as long as `selfTest` is enabled, because the
+library performs a DNS lookup before validation. If you provide a publisher, it
+should be idempotent: create the record when it is missing and otherwise leave
+the existing TXT record unchanged.
+
+The manual `prepareDnsPersistCertificateRequest(...)` flow is intended for
+operator-driven issuance and is not suitable for unattended renewal. It should
+not be needed for renewals if the TXT record still exists.
 
 This, however, isn't sufficient for any long-running service.
 

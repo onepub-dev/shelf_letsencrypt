@@ -208,12 +208,6 @@ class LetsEncrypt {
     required CertificateCredentials certificateCredentials,
   }) async {
     final publish = dnsPersistChallengePublisher;
-    if (publish == null) {
-      throw StateError(
-        'LetsEncrypt configured for dns-persist-01 but no dnsPersistChallengePublisher was provided',
-      );
-    }
-
     final order = await account.createOrderForDnsPersist(
       identifiers: [identifier],
     );
@@ -221,10 +215,17 @@ class LetsEncrypt {
     final challenge = authorization.getChallenge();
     final proof = challenge.buildProof();
 
-    logger.info(
-      'Publishing dns-persist-01 challenge for $cn: ${proof.toBindString()}',
-    );
-    await publish(cn, proof);
+    if (publish == null) {
+      logger.info(
+        'No dns-persist-01 publisher configured for $cn; '
+        'validating existing DNS record: ${proof.toBindString()}',
+      );
+    } else {
+      logger.info(
+        'Publishing dns-persist-01 challenge for $cn: ${proof.toBindString()}',
+      );
+      await publish(cn, proof);
+    }
 
     return _validateFinalizeAndFetch(
       cn: cn,
@@ -283,7 +284,15 @@ class LetsEncrypt {
     return PendingDnsPersistRequest.internal(
       domainName: domain.name,
       proof: proof,
-      complete: () async {
+      complete: ({bool forceRequestCertificate = false}) async {
+        if (!forceRequestCertificate &&
+            certificatesHandler.isHandledDomainCertificate(domain.name)) {
+          logger.info(
+            'Certificate for ${domain.name} is already stored and valid.',
+          );
+          return true;
+        }
+
         final certs = await _validateFinalizeAndFetch(
           cn: domain.name,
           challengeSelfTest: () => challenge.selfTest(),
@@ -669,11 +678,13 @@ class LetsEncrypt {
   /// Calls [doACMEChallenge].
   Future<bool> requestCertificate(Domain domain) async {
     if (challengeType == LetsEncryptChallengeType.dnsPersist &&
-        dnsPersistChallengePublisher == null) {
+        dnsPersistChallengePublisher == null &&
+        !selfTest) {
       throw StateError(
-        'LetsEncrypt configured for dns-persist-01 without a publisher. '
-        'Use prepareDnsPersistCertificateRequest(domain) for a manual flow '
-        'or provide dnsPersistChallengePublisher for automated publication.',
+        'LetsEncrypt configured for dns-persist-01 with no publisher and '
+        'selfTest disabled. Provide dnsPersistChallengePublisher, enable '
+        'selfTest so the existing TXT record can be verified, or use '
+        'prepareDnsPersistCertificateRequest(domain) for a manual flow.',
       );
     }
 
@@ -696,10 +707,14 @@ class LetsEncrypt {
     return ok;
   }
 
-  /// The minimal accepted HTTPS certificate validity time
-  /// when checking the current certificate validity. Default: 5 days
+  /// The maximum renewal buffer when checking the current certificate validity.
+  ///
+  /// The effective buffer is the smaller of this value and one third of the
+  /// certificate lifetime. With the default 30 day cap, a 90 day certificate is
+  /// renewed with 30 days remaining and a 45 day certificate is renewed with 15
+  /// days remaining.
   /// - See [isDomainHttpsOK].
-  Duration minCertificateValidityTime = const Duration(days: 5);
+  Duration minCertificateValidityTime = const Duration(days: 30);
 
   /// Returns true if [domain] HTTPS is OK.
   Future<bool> isDomainHttpsOK(Domain domain,
@@ -770,11 +785,16 @@ class LetsEncrypt {
         return null;
       }
 
-      if (minCertificateValidityTime != null &&
-          timeLeftInValidity < minCertificateValidityTime) {
-        logger.warning(
-            'URL `${url.scheme}://${url.host}` certificate short validity period> timeLeftInValidity: ${timeLeftInValidity.inHours} h ; minCertificateValidityTime: ${minCertificateValidityTime.inHours} h ; endValidity: $endValidity ; now: $now');
-        return null;
+      if (minCertificateValidityTime != null) {
+        final effectiveMinValidityTime = _effectiveMinCertificateValidityTime(
+          certificate,
+          minCertificateValidityTime,
+        );
+        if (timeLeftInValidity < effectiveMinValidityTime) {
+          logger.warning(
+              'URL `${url.scheme}://${url.host}` certificate short validity period> timeLeftInValidity: ${timeLeftInValidity.inHours} h ; minCertificateValidityTime: ${effectiveMinValidityTime.inHours} h ; endValidity: $endValidity ; now: $now');
+          return null;
+        }
       }
     }
 
@@ -782,6 +802,28 @@ class LetsEncrypt {
     final body = data.join();
 
     return body;
+  }
+
+  Duration _effectiveMinCertificateValidityTime(
+    X509Certificate certificate,
+    Duration maxRenewalBuffer,
+  ) {
+    final lifetime = certificate.endValidity.difference(
+      certificate.startValidity,
+    );
+    if (lifetime <= Duration.zero) {
+      return maxRenewalBuffer;
+    }
+
+    final oneThirdLifetime = Duration(
+      microseconds: lifetime.inMicroseconds ~/ 3,
+    );
+    if (oneThirdLifetime <= Duration.zero ||
+        oneThirdLifetime > maxRenewalBuffer) {
+      return maxRenewalBuffer;
+    }
+
+    return oneThirdLifetime;
   }
 
   /// Handles a bad certificate triggered by [HttpClient].

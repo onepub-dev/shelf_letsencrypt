@@ -14,8 +14,8 @@ class PendingDnsPersistRequest {
   PendingDnsPersistRequest.internal({
     required this.domainName,
     required this.proof,
-    required this.complete,
-  });
+    required Future<bool> Function({bool forceRequestCertificate}) complete,
+  }) : _complete = complete;
 
   /// The domain being validated.
   final String domainName;
@@ -23,8 +23,51 @@ class PendingDnsPersistRequest {
   /// The persistent TXT record the user must publish.
   final DnsPersistChallengeProof proof;
 
+  final Future<bool> Function({bool forceRequestCertificate}) _complete;
+
+  Future<bool>? _completion;
+
   /// Completes validation, finalizes the order, and stores the certificate.
   ///
   /// Call this only after the TXT record from [proof] has been published.
-  final Future<bool> Function() complete;
+  ///
+  /// This method is idempotent for a prepared request unless
+  /// [forceRequestCertificate] is `true`. Concurrent calls share the same
+  /// in-flight completion, and calls after a successful completion return the
+  /// same result. If completion fails or [timeout] expires, a later call retries
+  /// the validation/finalization step.
+  Future<bool> complete({
+    bool forceRequestCertificate = false,
+    Duration? timeout,
+  }) {
+    if (forceRequestCertificate) {
+      _completion = null;
+      return _completion = _completeOnce(
+        forceRequestCertificate: true,
+        timeout: timeout,
+      );
+    }
+
+    final completion = _completion;
+    if (completion != null) {
+      return completion;
+    }
+
+    return _completion = _completeOnce(timeout: timeout);
+  }
+
+  Future<bool> _completeOnce({
+    bool forceRequestCertificate = false,
+    Duration? timeout,
+  }) async {
+    try {
+      final completion = _complete(
+        forceRequestCertificate: forceRequestCertificate,
+      );
+      return await (timeout == null ? completion : completion.timeout(timeout));
+    } catch (_) {
+      _completion = null;
+      rethrow;
+    }
+  }
 }

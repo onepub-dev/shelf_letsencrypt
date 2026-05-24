@@ -38,7 +38,9 @@ Future<void> main(List<String> args) async {
     stdin.readLineSync();
   }
 
-  final ok = await pending.complete();
+  final ok = await pending.complete(
+    forceRequestCertificate: options.forceRequestCertificate,
+  );
   if (!ok) {
     stderr.writeln('Certificate request did not complete successfully.');
     exitCode = 1;
@@ -58,6 +60,7 @@ class _CliOptions {
     required this.production,
     required this.acmeDirectoryUrl,
     required this.autoContinue,
+    required this.forceRequestCertificate,
   });
 
   final String domain;
@@ -66,6 +69,7 @@ class _CliOptions {
   final bool production;
   final String? acmeDirectoryUrl;
   final bool autoContinue;
+  final bool forceRequestCertificate;
 
   static _CliOptions? parse(List<String> args) {
     String? domain;
@@ -74,6 +78,7 @@ class _CliOptions {
     String? acmeDirectoryUrl;
     var production = false;
     var autoContinue = false;
+    var forceRequestCertificate = false;
 
     for (var i = 0; i < args.length; i++) {
       final arg = args[i];
@@ -96,6 +101,9 @@ class _CliOptions {
         case '--yes':
           autoContinue = true;
           break;
+        case '--force-request-certificate':
+          forceRequestCertificate = true;
+          break;
         case '--help':
         case '-h':
           return null;
@@ -116,6 +124,7 @@ class _CliOptions {
       production: production,
       acmeDirectoryUrl: acmeDirectoryUrl,
       autoContinue: autoContinue,
+      forceRequestCertificate: forceRequestCertificate,
     );
   }
 
@@ -142,4 +151,7 @@ void _printUsage(IOSink out) {
     '  --production        Use Let\'s Encrypt production instead of staging.',
   );
   out.writeln('  --yes               Do not wait for ENTER before continuing.');
+  out.writeln(
+    '  --force-request-certificate  Request a certificate even if one is valid.',
+  );
 }
